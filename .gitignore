@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# TypeScript incremental build info (tsc -b)
+*.tsbuildinfo
+
+# Downloaded/cloned/built deployments land here at runtime.
+# Without Docker: dist/output/<id> (compiled JS's own output folder).
+# With Docker (vercel_deploy): output/<id> at the repo root, via the
+# docker-compose bind mount (./output:/app/dist/output) — this is what
+# makes the build worker's downloaded/built files visible on the host.
+output/
+
+# Environment variables — contains R2/S3 credentials, never commit
+.env
+.env.*
+!.env.example
+
+# Logs
+npm-debug.log*
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
