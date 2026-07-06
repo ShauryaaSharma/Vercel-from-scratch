@@ -1,0 +1,22 @@
+{
+  "name": "vercel_deploy",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@types/node": "^26.1.0",
+    "aws-sdk": "^2.1693.0",
+    "dotenv": "^17.4.2",
+    "redis": "^6.1.0",
+    "typescript": "^6.0.3"
+  }
+}

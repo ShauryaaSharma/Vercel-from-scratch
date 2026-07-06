@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Cloned repos land here at runtime (dist/output/<id> and src/output/<id>)
+output/
+
+# Environment variables — contains R2/S3 credentials, never commit
+.env
+.env.*
+!.env.example
+
+# Logs
+npm-debug.log*
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
