@@ -1,24 +1,14 @@
 services:
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    ports:
-      - "6380:6379"
-    volumes:
-      - redis-data:/data
 
   worker:
     build: .
     restart: unless-stopped
-    depends_on:
-      - redis
     volumes:
       - ./output:/app/dist/output
     environment:
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://host.docker.internal:6380
       ACCESS_KEY_ID: ${ACCESS_KEY_ID}
       SECRET_ACCESS_KEY: ${SECRET_ACCESS_KEY}
       ENDPOINT_FOR_S3: ${ENDPOINT_FOR_S3}
-
-volumes:
-  redis-data:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

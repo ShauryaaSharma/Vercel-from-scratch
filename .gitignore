@@ -2,10 +2,19 @@
 node_modules/
 
 # Build output
+# - services: tsc output (vercel_*/dist)
+# - frontend: Vite production build (frontend/dist)
 dist/
+build/
+
+# Vite dev/build cache
+.vite/
 
 # TypeScript incremental build info (tsc -b)
 *.tsbuildinfo
+
+# Test coverage
+coverage/
 
 # Downloaded/cloned/built deployments land here at runtime.
 # Without Docker: dist/output/<id> (compiled JS's own output folder).
