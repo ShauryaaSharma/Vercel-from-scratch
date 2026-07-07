@@ -7,8 +7,13 @@ import { fileURLToPath } from "url";
 import path from "path";
 import { uploadFile } from "./aws.js";
 import { createClient } from "redis";
-const publisher = process.env.REDIS_URL
+const subscriber = process.env.REDIS_URL
     ? createClient({ url: process.env.REDIS_URL })
+    : createClient();
+subscriber.connect();
+
+const publisher = process.env.REDIS_URL
+    ? createClient({url: process.env.REDIS_URL})
     : createClient();
 publisher.connect();
 
@@ -33,9 +38,18 @@ app.post("/deploy", async (req, res) => {
     ));
 
     await publisher.lPush("build-queue", id);
+    await publisher.hSet("status", id, "uploaded");
 
     res.json({
         id: id
+    })
+})
+
+app.get("/status", async (req, res) => {
+    const id = req.query.id;
+    const response = await subscriber.hGet("status", id as string);
+    res.json({
+        status: response
     })
 })
 

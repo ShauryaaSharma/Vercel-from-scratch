@@ -6,6 +6,11 @@ const subscriber = process.env.REDIS_URL
     : createClient();
 subscriber.connect();
 
+const publisher = process.env.REDIS_URL
+    ? createClient({url: process.env.REDIS_URL})
+    : createClient();
+publisher.connect();
+
 async function main(){
     while(1){
         const res = await subscriber.brPop('build-queue', 0);
@@ -25,6 +30,7 @@ async function main(){
         } catch (err) {
             console.error(`Job failed for id ${id}:`, err);
         }
+        publisher.hSet("status", id , "deployed");
     }
 }
 

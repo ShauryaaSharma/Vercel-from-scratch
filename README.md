@@ -2,13 +2,30 @@
 
 This project is a simplified, from-scratch rebuild of Vercel — the platform that takes a GitHub link and turns it into a live website, without you ever touching a server.
 
-The whole system is split into three phases, each one a separate service:
+The whole system is split into three backend services, plus a small web frontend:
 
-1. **[Ingestion Service](#ingestion-service)** — takes a GitHub repo URL, clones it, and stores every file.
-2. **[Build Service](#build-service)** — picks up a queued deployment, downloads it back, builds it, and publishes the output.
-3. **Request Router** — serves the built site to real visitors on a real URL. *(not built yet)*
+1. **[Ingestion Service](#ingestion-service)** (`vercel_upload`) — takes a GitHub repo URL, clones it, and stores every file.
+2. **[Build Service](#build-service)** (`vercel_deploy`) — picks up a queued deployment, downloads it back, builds it, and publishes the output.
+3. **[Request Router](#request-router)** (`vercel_request_handler`) — serves each built site to real visitors on its own URL.
+4. **[Frontend](#frontend)** (`frontend`) — a React dashboard to trigger a deployment and watch it go live.
 
-The Ingestion Service and Build Service both exist so far. That's what the rest of this README documents.
+All three services are built and a frontend ties them together. Each piece is documented below.
+
+### End-to-end flow
+
+```
+Frontend  ──POST /deploy──▶  Ingestion Service ──┬─▶ upload files ─▶ Storage (output/<id>)
+ (:5173)                        (:3000)          └─▶ push id ─────▶ Redis (build-queue)
+                                                                        │
+                                                          BRPOP         ▼
+Storage (dist/<id>) ◀── upload built site ── Build Service ◀── pull job
+       │                                       (worker)
+       ▼
+Request Router (:3001)  ──serves──▶  http://<id>.localhost:3001  (the live site)
+```
+
+Along the way the Frontend polls `GET /status?id=<id>` on the Ingestion
+Service to show the deployment moving from `uploaded` to `deployed`.
 
 ## Ingestion Service
 
@@ -428,6 +445,196 @@ kind of thing that bites anyone building a background worker like this.
 
 ### What's next
 
-**Request Router** — takes a deployment ID (or a custom domain mapped to
-one), fetches the matching built files from `dist/<id>/...` in storage, and
-serves them to real visitors as an actual, reachable website.
+The built output now has a home: the **Request Router** below picks up
+`dist/<id>/...` from storage and serves it to real visitors.
+
+---
+
+## Request Router
+
+Part 3 of a 3-part project: building a simplified version of Vercel from
+scratch.
+
+This is the service real visitors actually hit. Every deployment gets its
+own subdomain — `<id>.localhost:3001` — and this router pulls that
+deployment's built files back out of storage and serves them. It's the piece
+that turns `dist/<id>/...` in a bucket into a reachable website.
+
+> Series: Ingestion Service → Build Service → **Request Router** (this repo)
+
+### What it does
+
+1. Accepts any GET request on any path (`/{*any}` — a catch-all route)
+2. Reads the deployment ID from the request's subdomain
+   (`abc12.localhost` → `abc12`)
+3. Rewrites directory-style paths so a request for `/` (or any path ending
+   in `/`) maps to that folder's `index.html`
+4. Fetches the matching object from storage at `dist/<id><path>`
+5. Sets a `Content-Type` from the file extension and sends the bytes back
+6. Returns a clean `404 Not found` if the object doesn't exist, instead of
+   leaking a storage error to the page
+
+### Architecture
+
+```
+Visitor → GET <id>.localhost:3001/<path> → Request Router
+                                              │
+                                              ├─→ id   = host.split(".")[0]
+                                              ├─→ key  = dist/<id>/<path>
+                                              ├─→ getObject (S3 / R2)
+                                              └─→ res.send(body, Content-Type)
+```
+
+There's no queue and no Redis here — this service only reads from storage.
+It's the one part of the system a normal end user ever talks to directly.
+
+### Tech stack
+
+| Concern            | Choice                                              |
+|--------------------|-----------------------------------------------------|
+| HTTP server        | Express (catch-all `/{*any}` route)                 |
+| Object storage     | Cloudflare R2 (S3-compatible API, via `aws-sdk` v2) |
+| Routing key        | Subdomain of the request host                       |
+| Language / runtime | TypeScript, compiled to ESM, Node.js                |
+
+### Project structure
+
+```
+src/
+  index.ts   → Express server, catch-all route, subdomain → storage lookup
+```
+
+### Setup
+
+#### 1. Install dependencies
+
+```
+npm install
+```
+
+#### 2. Environment variables
+
+Same three credentials as the other services:
+
+```
+ACCESS_KEY_ID=<your R2 access key id>
+SECRET_ACCESS_KEY=<your R2 secret access key>
+ENDPOINT_FOR_S3=<your R2 endpoint URL>
+```
+
+#### 3. Build and run
+
+```
+npx tsc -b
+node dist/index.js
+```
+
+The server listens on port `3001`.
+
+#### 4. Reaching a deployment
+
+Open `http://<id>.localhost:3001` in a browser, where `<id>` is a
+deployment ID returned by the Ingestion Service. Modern browsers resolve
+`*.localhost` to `127.0.0.1` automatically, so no hosts-file editing is
+needed — `abc12.localhost` just works and carries the ID in as a subdomain.
+
+### Design notes
+
+- **`/` has no object in storage — it has to become `/index.html`.** S3/R2
+  has no real folders, only keys. A request for the site root arrives as
+  path `/`, which would look up the key `dist/<id>/` — a prefix, not an
+  actual object — and fail with `NoSuchKey`. A static file server has to
+  supply the `index.html` itself; storage never will. Any path ending in
+  `/` is rewritten to append `index.html` before the lookup.
+- **Errors return 404, not a stack trace.** A missing key throws from the
+  storage SDK. Without handling, that exception rendered a raw AWS error
+  (and its internals) straight onto the page. Wrapping the lookup in
+  try/catch turns any miss into a plain `404 Not found`.
+- **`Content-Type` has to be derived, because storage doesn't tell you.**
+  The bytes come back the same regardless of file type, so the router has
+  to label them itself from the file extension — otherwise the browser
+  guesses, and usually guesses wrong (an HTML page served as generic bytes
+  won't render as a page). See the limitation below on how complete that
+  mapping currently is.
+
+### Known limitations / not yet handled
+
+- **Only HTML, CSS, and JS get a correct `Content-Type`.** Everything else
+  — images (`.svg`, `.png`), fonts, `.json` — currently falls through to a
+  JavaScript content type, so browsers refuse to render it and those assets
+  show up broken. The fix is an explicit extension → MIME map (`.svg` →
+  `image/svg+xml`, `.png` → `image/png`, …) with an
+  `application/octet-stream` binary fallback.
+- **No SPA fallback for deep links.** Only trailing-slash paths fall back to
+  `index.html`. A client-side route like `/about` with no matching object
+  returns 404 rather than serving the app's `index.html`, so refreshing a
+  deep link in a single-page app breaks.
+- **No caching headers.** Every request is a fresh storage fetch; there's no
+  `Cache-Control`, `ETag`, or CDN layer in front.
+- **No custom domains.** Routing is strictly `<id>.localhost` → `<id>`;
+  there's no mapping from a real domain to a deployment.
+
+---
+
+## Frontend
+
+A small React dashboard that puts a face on the three services — how you
+actually drive a deployment without hand-crafting `curl` requests.
+
+> Talks only to the Ingestion Service's HTTP API; it never touches Redis or
+> storage directly.
+
+### What it does
+
+- A **landing page** describing the project and its architecture
+- A **deploy page** that:
+  1. `POST`s a repo URL to the Ingestion Service (`/deploy`)
+  2. Polls the deployment's status (`/status?id=<id>`) and shows a live
+     two-step progress checklist — *uploading*, then *building & deploying*,
+     each ticking green as it completes
+  3. Surfaces the finished site's URL (`http://<id>.localhost:3001`) once the
+     status flips to `deployed`
+
+### Architecture
+
+```
+Frontend (Vite/React, :5173)
+   │
+   ├─→ POST /deploy {repoURL}   → Ingestion Service (:3000) → { id }
+   ├─→ GET  /status?id=<id>     → Ingestion Service (:3000) → { status }
+   └─→ link to <id>.localhost:3001 → Request Router (the live site)
+```
+
+### Tech stack
+
+| Concern    | Choice                       |
+|------------|------------------------------|
+| Framework  | React 18                     |
+| Build tool | Vite                         |
+| Routing    | react-router-dom             |
+| API calls  | `fetch` (CORS, no dev proxy) |
+
+### Project structure
+
+```
+src/
+  main.jsx          → router setup (/ and /deploy)
+  config.js         → API base URL (VITE_API_BASE_URL, default :3000)
+  index.css         → styling
+  pages/
+    Landing.jsx     → landing page + architecture walkthrough
+    Deploy.jsx      → deploy form, status polling, progress UI
+```
+
+### Setup
+
+```
+cd frontend
+npm install
+npm run dev
+```
+
+Opens on `http://localhost:5173`. The API base URL defaults to
+`http://localhost:3000`; override it with a `VITE_API_BASE_URL` env var if
+the Ingestion Service runs elsewhere. All three backend services (and Redis)
+must be running for a deployment to complete end to end.
