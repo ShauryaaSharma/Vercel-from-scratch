@@ -1,0 +1,5 @@
+# Ensure the `git` binary is available at build AND runtime.
+# The upload service clones repos via simple-git, which shells out to `git`.
+# The "..." token keeps Nixpacks' default packages and appends git.
+[phases.setup]
+nixPkgs = ["...", "git"]
