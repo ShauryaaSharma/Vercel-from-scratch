@@ -236,6 +236,62 @@ a {
   border-color: #444;
 }
 
+/* ---- Environment variables ---- */
+.env-section {
+  margin-top: 20px;
+}
+
+.env-heading {
+  display: block;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.env-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.env-row {
+  display: flex;
+  gap: 8px;
+}
+
+.env-input {
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+.env-remove {
+  flex: 0 0 auto;
+  width: 38px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.env-remove:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.env-remove:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.env-add {
+  margin-top: 10px;
+  padding: 8px 16px;
+  font-size: 13px;
+}
+
 .alert {
   margin-top: 18px;
   padding: 12px 14px;

@@ -32,12 +32,27 @@ function Step({ state, title, subtitle }) {
 
 export default function Deploy() {
   const [repoURL, setRepoURL] = useState("");
+  const [envVars, setEnvVars] = useState([{ key: "", value: "" }]);
   const [id, setId] = useState("");
   const [status, setStatus] = useState("");
   const [started, setStarted] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [error, setError] = useState("");
   const pollRef = useRef(null);
+
+  const updateEnvVar = (index, field, value) => {
+    setEnvVars((rows) =>
+      rows.map((row, i) => (i === index ? { ...row, [field]: value } : row))
+    );
+  };
+
+  const addEnvVarRow = () => {
+    setEnvVars((rows) => [...rows, { key: "", value: "" }]);
+  };
+
+  const removeEnvVarRow = (index) => {
+    setEnvVars((rows) => rows.filter((_, i) => i !== index));
+  };
 
   // Poll GET /status?id=<id> until the worker reports "deployed".
   useEffect(() => {
@@ -78,12 +93,18 @@ export default function Deploy() {
     setStarted(true);
     setDeploying(true);
     try {
+      const envVarsObject = Object.fromEntries(
+        envVars
+          .filter((row) => row.key.trim())
+          .map((row) => [row.key.trim(), row.value])
+      );
+
       // The POST blocks while the server clones the repo and uploads it to S3.
       // Once it returns an id, the "upload" step is complete.
       const res = await fetch(`${API_BASE_URL}/deploy`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repoURL: repoURL.trim() }),
+        body: JSON.stringify({ repoURL: repoURL.trim(), envVars: envVarsObject }),
       });
       const data = await res.json();
       if (data.id) {
@@ -137,6 +158,49 @@ export default function Deploy() {
             {deploying ? "Deploying…" : "Deploy"}
           </button>
         </form>
+
+        <div className="env-section">
+          <span className="env-heading">Environment variables (optional)</span>
+          <div className="env-rows">
+            {envVars.map((row, index) => (
+              <div className="env-row" key={index}>
+                <input
+                  className="input env-input"
+                  type="text"
+                  placeholder="KEY"
+                  value={row.key}
+                  onChange={(e) => updateEnvVar(index, "key", e.target.value)}
+                  disabled={deploying}
+                />
+                <input
+                  className="input env-input"
+                  type="text"
+                  placeholder="value"
+                  value={row.value}
+                  onChange={(e) => updateEnvVar(index, "value", e.target.value)}
+                  disabled={deploying}
+                />
+                <button
+                  type="button"
+                  className="env-remove"
+                  onClick={() => removeEnvVarRow(index)}
+                  disabled={deploying || envVars.length === 1}
+                  aria-label="Remove variable"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost env-add"
+            onClick={addEnvVarRow}
+            disabled={deploying}
+          >
+            + Add variable
+          </button>
+        </div>
 
         {error && <div className="alert error">{error}</div>}
 
