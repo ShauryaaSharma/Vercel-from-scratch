@@ -25,7 +25,9 @@ async function main(){
         try {
             await downloadS3Folder(`output/${id}`);
             console.log(res);
-            await buildProject(id);
+            const envVarsRaw = await subscriber.hGet("env", id);
+            const envVars = envVarsRaw ? JSON.parse(envVarsRaw) : {};
+            await buildProject(id, envVars);
             await copyFinalDist(id);
         } catch (err) {
             console.error(`Job failed for id ${id}:`, err);
