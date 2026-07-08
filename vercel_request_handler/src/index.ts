@@ -47,12 +47,19 @@ const s3 = new S3({
 })
 
 app.get("/{*any}", async (req, res) => {
-    const host = req.hostname;
-    console.log(host);
-    const id = host.split(".")[0];
-    console.log(id);
-    let filePath = req.path;
-    // Directory paths (e.g. "/") have no object in S3; serve their index.html.
+    // Deployments are addressed by path prefix (/<id>/...), not subdomain —
+    // this lets every site live under one shared domain, no custom/wildcard
+    // domain required. Sites are built with --base=/<id>/ (see vercel_deploy)
+    // so their own asset requests already carry this same prefix.
+    const segments = req.path.split("/").filter(Boolean);
+    const id = segments[0];
+    if (!id) {
+        res.status(404).send("Not found");
+        return;
+    }
+
+    let filePath = "/" + segments.slice(1).join("/");
+    // Directory paths (e.g. "/<id>" or "/<id>/") have no object in S3; serve their index.html.
     if (filePath === "/" || filePath.endsWith("/")) {
         filePath += "index.html";
     }
