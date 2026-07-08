@@ -4,9 +4,9 @@
 export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://localhost:3000";
 
-// Domain that deployed sites live under, e.g. "deploys.example.com", so a
-// deployment renders at "<id>.deploys.example.com". The request handler
-// resolves the deploy id from the subdomain, which only works once this
-// domain has a wildcard DNS record pointed at it. Unset until that domain
-// exists — set VITE_SITE_DOMAIN once it's configured.
-export const SITE_DOMAIN = import.meta.env.VITE_SITE_DOMAIN || "";
+// Base URL of the vercel_request_handler service (the Express server in
+// ../vercel_request_handler). Deployments are served by path, not
+// subdomain — a deployment renders at "<REQUEST_HANDLER_URL>/<id>/" — so no
+// custom or wildcard domain is required.
+export const REQUEST_HANDLER_URL =
+  import.meta.env.VITE_REQUEST_HANDLER_URL || "http://localhost:3001";
