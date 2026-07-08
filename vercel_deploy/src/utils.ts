@@ -48,7 +48,10 @@ export function buildProject(id: string) {
                 return;
             }
 
-            const build = spawn(npmCmd, ["run", "build"], { cwd: outputPath, shell: useShell });
+            // --base=/<id>/ makes Vite emit asset URLs like /<id>/assets/x.js
+            // instead of /assets/x.js, so the site works when served from a
+            // path prefix (no wildcard subdomain/custom domain required).
+            const build = spawn(npmCmd, ["run", "build", "--", `--base=/${id}/`], { cwd: outputPath, shell: useShell });
 
             build.stdout?.on('data', function(data) {
                 console.log('stdout: ' + data);
