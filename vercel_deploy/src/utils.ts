@@ -8,7 +8,7 @@ export function isValidId(id: string): boolean {
     return SAFE_ID.test(id);
 }
 
-export function buildProject(id: string) {
+export function buildProject(id: string, envVars: Record<string, string> = {}) {
     return new Promise<void>((resolve, reject) => {
         if (!isValidId(id)) {
             reject(new Error(`Invalid id: ${id}`));
@@ -30,7 +30,22 @@ export function buildProject(id: string) {
         const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
         const useShell = process.platform === "win32";
 
-        const install = spawn(npmCmd, ["install", "--include=dev"], { cwd: outputPath, shell: useShell });
+        // Explicit, minimal environment for the untrusted project's install/build
+        // scripts. Deliberately does NOT spread process.env — this worker's own
+        // env holds R2/S3 credentials and the Redis URL, which a malicious
+        // postinstall/build script could otherwise read and exfiltrate. Only
+        // PATH/HOME (needed to resolve node/npm and caches) and the deployer's
+        // own requested variables are passed through.
+        const childEnv: NodeJS.ProcessEnv = {
+            ...envVars,
+            PATH: process.env.PATH ?? "",
+            HOME: process.env.HOME ?? "",
+        };
+        if (process.env.ComSpec) {
+            childEnv.ComSpec = process.env.ComSpec;
+        }
+
+        const install = spawn(npmCmd, ["install", "--include=dev"], { cwd: outputPath, shell: useShell, env: childEnv });
 
         install.stdout?.on('data', function(data) {
             console.log('stdout: ' + data);
@@ -51,7 +66,7 @@ export function buildProject(id: string) {
             // --base=/<id>/ makes Vite emit asset URLs like /<id>/assets/x.js
             // instead of /assets/x.js, so the site works when served from a
             // path prefix (no wildcard subdomain/custom domain required).
-            const build = spawn(npmCmd, ["run", "build", "--", `--base=/${id}/`], { cwd: outputPath, shell: useShell });
+            const build = spawn(npmCmd, ["run", "build", "--", `--base=/${id}/`], { cwd: outputPath, shell: useShell, env: childEnv });
 
             build.stdout?.on('data', function(data) {
                 console.log('stdout: ' + data);
