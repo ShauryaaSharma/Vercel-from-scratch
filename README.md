@@ -21,7 +21,7 @@ Frontend  ──POST /deploy──▶  Ingestion Service ──┬─▶ upload 
 Storage (dist/<id>) ◀── upload built site ── Build Service ◀── pull job
        │                                       (worker)
        ▼
-Request Router (:3001)  ──serves──▶  http://<id>.localhost:3001  (the live site)
+Request Router (:3001)  ──serves──▶  http://localhost:3001/<id>/  (the live site)
 ```
 
 Along the way the Frontend polls `GET /status?id=<id>` on the Ingestion
@@ -39,15 +39,19 @@ stage — the Build Service — to pick up.
 
 ### What it does
 
-1. Accepts a GitHub repo URL via `POST /deploy`
+1. Accepts a GitHub repo URL, and optionally a set of environment variables,
+   via `POST /deploy`
 2. Generates a random 5-character deployment ID
 3. Clones the repo locally under `output/<id>`
 4. Recursively collects every file in the cloned repo
 5. Uploads each file to an S3-compatible bucket (Cloudflare R2), preserving
    the folder structure as the object key
-6. Pushes the deployment ID onto a Redis queue (`build-queue`) for the Build
+6. Validates and stores any requested environment variables in Redis
+   (`hSet("env", id, ...)`), for the Build Service to inject into that
+   deployment's build
+7. Pushes the deployment ID onto a Redis queue (`build-queue`) for the Build
    Service to consume
-7. Returns the deployment ID to the caller
+8. Returns the deployment ID to the caller
 
 ### Architecture
 
@@ -139,9 +143,24 @@ The server listens on port `3000`.
 
 ```
 {
-  "repoURL": "https://github.com/<user>/<repo>.git"
+  "repoURL": "https://github.com/<user>/<repo>.git",
+  "envVars": {
+    "VITE_APP_NAME": "hello"
+  }
 }
 ```
+
+`envVars` is optional. Each entry must have a valid identifier as its key
+(`/^[A-Za-z_][A-Za-z0-9_]*$/`) and a string value; anything else (bad key
+names, non-string values, more than 30 entries, oversized keys/values) is
+silently dropped rather than rejecting the whole deploy. These become real
+environment variables during the Build Service's `npm install`/`npm run
+build` for this deployment only — see
+[Build Service → Design notes](#design-notes-1) for how that's isolated from
+the worker's own secrets, and note that they only affect the *build*: a
+framework like Vite only inlines vars prefixed `VITE_` into the shipped
+client bundle, and nothing here re-reads them at request time (see
+[Frontend](#frontend) for the practical implications).
 
 **Response**
 
@@ -225,8 +244,11 @@ because most of them will bite anyone building something similar.
 4. Confirms a `package.json` actually exists in the downloaded project —
    refusing to proceed otherwise, rather than letting `npm` silently run
    against the wrong project
-5. Runs `npm install --include=dev`, then `npm run build`, inside that
-   project's own folder
+5. Reads back any environment variables stored for this deployment
+   (`hGet("env", id)`) and runs `npm install --include=dev`, then
+   `npm run build -- --base=/<id>/`, inside that project's own folder —
+   using those variables and an otherwise minimal, explicit environment
+   (see [Design notes](#design-notes-1))
 6. Walks the resulting `output/<id>/dist/` folder and uploads every file
    back to storage under `dist/<id>/...`
 7. Catches and logs any failure per job, so one bad deployment never brings
@@ -237,9 +259,10 @@ because most of them will bite anyone building something similar.
 ```
 Redis (build-queue) → BRPOP → Build Worker
                                   │
-                                  ├─→ download files (S3 / R2) → output/<id>/
+                                  ├─→ download files (S3 / R2)     → output/<id>/
+                                  ├─→ read env vars (Redis: env)   → id-specific build env
                                   ├─→ npm install --include=dev
-                                  ├─→ npm run build              → output/<id>/dist/
+                                  ├─→ npm run build -- --base=/<id>/  → output/<id>/dist/
                                   └─→ upload built files (S3 / R2) → dist/<id>/...
 ```
 
@@ -406,6 +429,28 @@ kind of thing that bites anyone building a background worker like this.
   this specific case because the only variable input (`id`) is passed via
   `cwd`, never as part of the command or its arguments, which are always
   hardcoded literals (`"install"`, `"run"`, `"build"`).
+- **The untrusted build never sees this worker's own environment.**
+  `spawn` inherits the parent process's entire environment by default. Early
+  versions of this worker relied on that default — which meant a downloaded
+  project's `postinstall` or build script could read `process.env` and find
+  this worker's own R2 credentials and `REDIS_URL` sitting right there,
+  ready to exfiltrate. The fix was to stop relying on the default and pass
+  an explicit `env` to every `spawn` call: just `PATH`/`HOME` (so `node`/`npm`
+  still resolve) plus whatever variables the deployer requested via
+  `envVars` — nothing belonging to the worker itself. This matters more once
+  arbitrary users can request custom env vars for their build: it closes off
+  the obvious next question of "can I just ask for `ACCESS_KEY_ID` as one of
+  my variables and read it back" — no, because the worker's real env was
+  never in the child's environment to begin with.
+- **`--base=/<id>/` turns the build into something servable without a
+  domain.** By default, Vite emits asset URLs rooted at `/` (`/assets/x.js`),
+  which only works if the site owns the whole domain. Passing
+  `--base=/<id>/` on the build (via `npm run build -- --base=/<id>/`, which
+  npm forwards straight to the underlying Vite CLI) makes every emitted
+  asset URL start with `/<id>/` instead. That's what lets the Request
+  Router serve every deployment from one shared domain, keyed by a path
+  prefix, with no wildcard subdomain or custom domain required — see
+  [Request Router](#request-router).
 - **A pre-existing native Redis service can silently steal your traffic.**
   On the development machine this was built on, a native Windows Redis
   service was already running on the default port, bound specifically to
@@ -424,10 +469,12 @@ kind of thing that bites anyone building a background worker like this.
 
 - **The build itself isn't sandboxed per job.** `npm install`/`npm run
   build` still runs inside the same long-lived worker container as the
-  worker's own code and credentials — not a fresh, disposable container
-  per deployment. A malicious `postinstall` script could still read this
-  container's environment. True isolation (spawning a fresh container per
-  build, with no access to the worker's own secrets) is a larger follow-up.
+  worker's own code — not a fresh, disposable container per deployment. The
+  worker's own secrets are no longer exposed to it (see
+  [Design notes](#design-notes-1)), but a malicious build script still
+  shares the container's filesystem, CPU, and network with every other job.
+  True isolation (a fresh, throwaway container per build) is a larger
+  follow-up.
 - **No build timeout.** A hung `npm install` or `npm run build` (for
   example, a build script that accidentally starts a dev server instead of
   exiting) blocks that job forever. It won't crash the worker or block
@@ -455,21 +502,22 @@ The built output now has a home: the **Request Router** below picks up
 Part 3 of a 3-part project: building a simplified version of Vercel from
 scratch.
 
-This is the service real visitors actually hit. Every deployment gets its
-own subdomain — `<id>.localhost:3001` — and this router pulls that
-deployment's built files back out of storage and serves them. It's the piece
-that turns `dist/<id>/...` in a bucket into a reachable website.
+This is the service real visitors actually hit. Every deployment is
+addressed by a path prefix — `<request-handler-domain>/<id>/` — and this
+router pulls that deployment's built files back out of storage and serves
+them. It's the piece that turns `dist/<id>/...` in a bucket into a reachable
+website.
 
 > Series: Ingestion Service → Build Service → **Request Router** (this repo)
 
 ### What it does
 
 1. Accepts any GET request on any path (`/{*any}` — a catch-all route)
-2. Reads the deployment ID from the request's subdomain
-   (`abc12.localhost` → `abc12`)
-3. Rewrites directory-style paths so a request for `/` (or any path ending
-   in `/`) maps to that folder's `index.html`
-4. Fetches the matching object from storage at `dist/<id><path>`
+2. Reads the deployment ID from the **first path segment**
+   (`/abc12/assets/x.js` → `abc12`)
+3. Rewrites directory-style paths so a request for `/<id>` or `/<id>/` (or
+   any path ending in `/`) maps to that folder's `index.html`
+4. Fetches the matching object from storage at `dist/<id>/<rest-of-path>`
 5. Sets a `Content-Type` from the file extension and sends the bytes back
 6. Returns a clean `404 Not found` if the object doesn't exist, instead of
    leaking a storage error to the page
@@ -477,16 +525,21 @@ that turns `dist/<id>/...` in a bucket into a reachable website.
 ### Architecture
 
 ```
-Visitor → GET <id>.localhost:3001/<path> → Request Router
-                                              │
-                                              ├─→ id   = host.split(".")[0]
-                                              ├─→ key  = dist/<id>/<path>
-                                              ├─→ getObject (S3 / R2)
-                                              └─→ res.send(body, Content-Type)
+Visitor → GET <domain>/<id>/<path> → Request Router
+                                        │
+                                        ├─→ id   = first path segment
+                                        ├─→ key  = dist/<id>/<path>
+                                        ├─→ getObject (S3 / R2)
+                                        └─→ res.send(body, Content-Type)
 ```
 
 There's no queue and no Redis here — this service only reads from storage.
 It's the one part of the system a normal end user ever talks to directly.
+Every deployment lives under the **same** domain — there's no wildcard
+subdomain or custom domain to configure; see
+[Design notes](#design-notes-2) for why, and
+[Build Service → Design notes](#design-notes-1) for the build-side half of
+how this works.
 
 ### Tech stack
 
@@ -494,14 +547,14 @@ It's the one part of the system a normal end user ever talks to directly.
 |--------------------|-----------------------------------------------------|
 | HTTP server        | Express (catch-all `/{*any}` route)                 |
 | Object storage     | Cloudflare R2 (S3-compatible API, via `aws-sdk` v2) |
-| Routing key        | Subdomain of the request host                       |
+| Routing key        | First path segment of the request URL               |
 | Language / runtime | TypeScript, compiled to ESM, Node.js                |
 
 ### Project structure
 
 ```
 src/
-  index.ts   → Express server, catch-all route, subdomain → storage lookup
+  index.ts   → Express server, catch-all route, path prefix → storage lookup
 ```
 
 ### Setup
@@ -533,46 +586,54 @@ The server listens on port `3001`.
 
 #### 4. Reaching a deployment
 
-Open `http://<id>.localhost:3001` in a browser, where `<id>` is a
-deployment ID returned by the Ingestion Service. Modern browsers resolve
-`*.localhost` to `127.0.0.1` automatically, so no hosts-file editing is
-needed — `abc12.localhost` just works and carries the ID in as a subdomain.
+Open `http://localhost:3001/<id>/` in a browser, where `<id>` is a
+deployment ID returned by the Ingestion Service. The trailing slash matters
+on the bare `/<id>` root — see Design notes.
 
 ### Design notes
 
-- **`/` has no object in storage — it has to become `/index.html`.** S3/R2
-  has no real folders, only keys. A request for the site root arrives as
-  path `/`, which would look up the key `dist/<id>/` — a prefix, not an
-  actual object — and fail with `NoSuchKey`. A static file server has to
-  supply the `index.html` itself; storage never will. Any path ending in
-  `/` is rewritten to append `index.html` before the lookup.
+- **Path-based routing instead of subdomains, deliberately.** The natural
+  design for something like this is one subdomain per deployment
+  (`<id>.example.com`), the way the real Vercel does it. That requires a
+  domain you control, with a wildcard DNS record and a wildcard TLS
+  certificate pointed at this service — none of which a platform's
+  auto-generated URL (like `*.up.railway.app`) gives you, since you don't
+  control its DNS. Routing by the **first path segment** instead means
+  every deployment can be served from one single domain — including a free
+  platform-generated one — with no DNS or certificate work at all. The
+  trade-off: the deployed site itself has to be built aware of that prefix
+  (see [Build Service → Design notes](#design-notes-1) for the `--base`
+  flag that makes this transparent to whatever's deployed) rather than
+  legitimately owning the whole origin the way a subdomain would.
+- **`/<id>` or `/<id>/` has no object in storage — it has to become
+  `/<id>/index.html`.** S3/R2 has no real folders, only keys. A request for
+  a deployment's root arrives as a path ending at (or before) a `/`, which
+  would look up a key ending in `/` — a prefix, not an actual object — and
+  fail with `NoSuchKey`. A static file server has to supply the
+  `index.html` itself; storage never will. Any such path is rewritten to
+  append `index.html` before the lookup.
 - **Errors return 404, not a stack trace.** A missing key throws from the
   storage SDK. Without handling, that exception rendered a raw AWS error
   (and its internals) straight onto the page. Wrapping the lookup in
   try/catch turns any miss into a plain `404 Not found`.
-- **`Content-Type` has to be derived, because storage doesn't tell you.**
-  The bytes come back the same regardless of file type, so the router has
-  to label them itself from the file extension — otherwise the browser
-  guesses, and usually guesses wrong (an HTML page served as generic bytes
-  won't render as a page). See the limitation below on how complete that
-  mapping currently is.
+- **`Content-Type` is derived from an explicit extension → MIME map,
+  because storage doesn't tell you.** The bytes come back the same
+  regardless of file type, so the router labels them itself. An earlier
+  version only recognized `.html` and `.css`, silently labeling everything
+  else — including every image and font — as `application/javascript`,
+  which browsers correctly refuse to render. The map now covers HTML, CSS,
+  JS, JSON, common image formats (`svg`, `png`, `jpg`, `gif`, `webp`, `ico`)
+  and fonts (`woff`, `woff2`, `ttf`), falling back to
+  `application/octet-stream` for anything unrecognized.
 
 ### Known limitations / not yet handled
 
-- **Only HTML, CSS, and JS get a correct `Content-Type`.** Everything else
-  — images (`.svg`, `.png`), fonts, `.json` — currently falls through to a
-  JavaScript content type, so browsers refuse to render it and those assets
-  show up broken. The fix is an explicit extension → MIME map (`.svg` →
-  `image/svg+xml`, `.png` → `image/png`, …) with an
-  `application/octet-stream` binary fallback.
 - **No SPA fallback for deep links.** Only trailing-slash paths fall back to
-  `index.html`. A client-side route like `/about` with no matching object
-  returns 404 rather than serving the app's `index.html`, so refreshing a
-  deep link in a single-page app breaks.
+  `index.html`. A client-side route like `/<id>/about` with no matching
+  object returns 404 rather than serving the app's `index.html`, so
+  refreshing a deep link in a single-page app breaks.
 - **No caching headers.** Every request is a fresh storage fetch; there's no
   `Cache-Control`, `ETag`, or CDN layer in front.
-- **No custom domains.** Routing is strictly `<id>.localhost` → `<id>`;
-  there's no mapping from a real domain to a deployment.
 
 ---
 
@@ -588,21 +649,23 @@ actually drive a deployment without hand-crafting `curl` requests.
 
 - A **landing page** describing the project and its architecture
 - A **deploy page** that:
-  1. `POST`s a repo URL to the Ingestion Service (`/deploy`)
-  2. Polls the deployment's status (`/status?id=<id>`) and shows a live
+  1. Takes a repo URL and, optionally, a set of key/value environment
+     variables (add/remove rows) to pass into that deployment's build
+  2. `POST`s both to the Ingestion Service (`/deploy`)
+  3. Polls the deployment's status (`/status?id=<id>`) and shows a live
      two-step progress checklist — *uploading*, then *building & deploying*,
      each ticking green as it completes
-  3. Surfaces the finished site's URL (`http://<id>.localhost:3001`) once the
-     status flips to `deployed`
+  4. Surfaces the finished site's URL
+     (`<request-handler-domain>/<id>/`) once the status flips to `deployed`
 
 ### Architecture
 
 ```
 Frontend (Vite/React, :5173)
    │
-   ├─→ POST /deploy {repoURL}   → Ingestion Service (:3000) → { id }
-   ├─→ GET  /status?id=<id>     → Ingestion Service (:3000) → { status }
-   └─→ link to <id>.localhost:3001 → Request Router (the live site)
+   ├─→ POST /deploy {repoURL, envVars}   → Ingestion Service (:3000) → { id }
+   ├─→ GET  /status?id=<id>              → Ingestion Service (:3000) → { status }
+   └─→ link to <request-handler-domain>/<id>/ → Request Router (the live site)
 ```
 
 ### Tech stack
@@ -619,11 +682,11 @@ Frontend (Vite/React, :5173)
 ```
 src/
   main.jsx          → router setup (/ and /deploy)
-  config.js         → API base URL (VITE_API_BASE_URL, default :3000)
+  config.js         → API base URL + Request Router base URL (env-configurable)
   index.css         → styling
   pages/
     Landing.jsx     → landing page + architecture walkthrough
-    Deploy.jsx      → deploy form, status polling, progress UI
+    Deploy.jsx      → deploy form (repo URL + env vars), status polling, progress UI
 ```
 
 ### Setup
@@ -634,7 +697,26 @@ npm install
 npm run dev
 ```
 
-Opens on `http://localhost:5173`. The API base URL defaults to
-`http://localhost:3000`; override it with a `VITE_API_BASE_URL` env var if
-the Ingestion Service runs elsewhere. All three backend services (and Redis)
-must be running for a deployment to complete end to end.
+Opens on `http://localhost:5173`. Two env vars control where it points:
+
+| Variable                   | Default                  | Purpose                                    |
+|-----------------------------|---------------------------|---------------------------------------------|
+| `VITE_API_BASE_URL`         | `http://localhost:3000`   | Ingestion Service — `/deploy` and `/status` |
+| `VITE_REQUEST_HANDLER_URL`  | `http://localhost:3001`   | Request Router — where the "Live URL" link points |
+
+All three backend services (and Redis) must be running for a deployment to
+complete end to end.
+
+### A note on environment variables and build-time-only effects
+
+The env vars entered on the deploy form only affect the **build** — they
+become real environment variables for that one `npm install`/`npm run
+build` run (see [Build Service](#build-service)), and if the deployed
+project's own code reads them (e.g. `import.meta.env.VITE_APP_NAME` in a
+Vite app), their values get inlined into the compiled output. There is no
+server running per deployment to re-read them afterward — the Request
+Router only streams static files back out of storage. So changing a
+variable's value never affects an already-built deployment; it only takes
+effect on the next fresh deploy. This mirrors how any static-site host
+(including the real Vercel, for a purely static project) treats build-time
+environment variables.
