@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { API_BASE_URL } from "../config.js";
+import { API_BASE_URL, SITE_DOMAIN } from "../config.js";
 
 // A single step in the progress checklist.
 // state: "pending" | "active" | "done"
@@ -163,17 +163,26 @@ export default function Deploy() {
               />
             </div>
 
-            {isDeployed && (
+            {isDeployed && SITE_DOMAIN && (
               <div className="result-row live">
                 <span className="label">Live URL</span>
                 <a
                   className="value link"
-                  href={`http://${id}.localhost:3001`}
+                  href={`https://${id}.${SITE_DOMAIN}`}
                   target="_blank"
                   rel="noreferrer"
                 >
-                  {`http://${id}.localhost:3001`}
+                  {`https://${id}.${SITE_DOMAIN}`}
                 </a>
+              </div>
+            )}
+
+            {isDeployed && !SITE_DOMAIN && (
+              <div className="result-row live">
+                <span className="label">Live URL</span>
+                <span className="value muted">
+                  Not available yet — no site domain configured
+                </span>
               </div>
             )}
           </div>

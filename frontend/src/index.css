@@ -285,6 +285,11 @@ a {
   color: #fff;
 }
 
+.value.muted {
+  color: var(--muted);
+  font-style: italic;
+}
+
 code.value {
   background: #000;
   border: 1px solid var(--border);
